@@ -1,0 +1,297 @@
+---
+title: "HW2 Boston TOD Analysis"
+author: "Jun, Youngsang"
+date: 'September 19, 2024'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Load Libraries
+
+```{r}
+install.packages("mapview")
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(mapview)
+```
+
+```{r}
+options(scipen=999)
+options(tigris_class = "sf")
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r}
+census_api_key("b2835f54d89a4499ba29829c908967b86765b345", overwrite = TRUE)
+```
+
+# Get American Community Survey (ACS) Data of Suffolk County (which Boston seats of) 2016
+```{r}
+tracts16 <-  
+  get_acs(geography = "tract",
+          variables = c("B25026_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), 
+          year=2016, state="MA",
+          county="Suffolk", geometry=TRUE) %>% 
+  	
+  st_transform('EPSG:26986') # Use NAD 83 CRS
+```
+Plot 1:
+```{r}
+ggplot() +
+  geom_sf(data = tracts16 %>% 
+            filter(variable == "B25026_001"), 
+          aes(fill = estimate)) + # Since B25026_001 is Total Population in Occupied Housing Units, used B01003_001E instead 	
+  theme(
+    plot.title = element_text(size=22)
+    )
+```
+Plot 2:
+```{r}
+  ggplot() +
+  geom_sf(data = tracts16 %>% 
+            filter(variable == "B25026_001"),
+          aes(fill = q5(estimate))) +
+  theme(plot.title = element_text(size=22)) 
+```
+
+Plot 3:
+```{r}
+ggplot() +
+  geom_sf(data = tracts16 %>% 
+            filter(variable == "B25026_001"),
+          aes(fill = q5(estimate))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(tracts16 %>% 
+            filter(variable == "B25026_001"), "estimate"),
+                    name = "Total\nPopluation\n(Quintile Breaks)") +
+  theme(plot.title = element_text(size=22))
+```
+
+Plot 4:
+```{r}
+ggplot() +
+  geom_sf(data = tracts16 %>% 
+            filter(variable == "B25026_001"), 
+          aes(fill = q5(estimate))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(tracts16 %>% 
+            filter(variable == "B25026_001"), "estimate"),
+                    name = "Population\n(Quintile Breaks)") +
+  labs(title = "Total Population", subtitle = "Boston; 2016") +
+  mapTheme() + 
+  theme(plot.title = element_text(size=22))
+```
+
+# Transforming Long Data to Wide Data using spread
+```{r}
+tracts16 <- 
+  tracts16 %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B25026_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+```
+
+```{r}
+tracts16 <- 
+  tracts16 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2016") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+```
+
+2020 Census Data
+```{r}
+tracts20 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E","B25058_001E",
+                        "B06012_002E"), 
+          year=2020, 
+          state="MA", 
+          county="Suffolk", 
+          geometry=TRUE, 
+          output="wide") %>%
+  st_transform('EPSG:26986') %>%
+  rename(TotalPop = B25026_001E, 
+         Whites = B02001_002E,
+         FemaleBachelors = B15001_050E, 
+         MaleBachelors = B15001_009E,
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop,0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop),0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2020") %>%
+  dplyr::select(-Whites, -FemaleBachelors, -MaleBachelors, -TotalPoverty) 
+```
+```{r}
+allTracts <- rbind(tracts16,tracts20)
+```
+
+
+# Wrangling Transit Open Data
+```{r}
+# MBTA_ARC <- st_read('./MBTA_RAPID_TRANSIT/GISDATA_MBTA_ARCLine.shp')
+# MBTA_NODE <- st_read('./MBTA_RAPID_TRANSIT/GISDATA_MBTA_NODEPoint.shp')
+MBTA_ARC <- st_read('./MBTA_RT/MBTA_ARC.shp')
+MBTA_NODE <- st_read('./MBTA_RT/MBTA_NODE.shp')
+
+```
+```{r}
+MBTA_NODE <- MBTA_NODE %>%
+  mutate(transferstation = ifelse(LINE == "BLUE", "BLUE",ifelse(LINE == "ORANGE", "ORANGE",ifelse(LINE == "RED", "RED",ifelse(LINE == "SILVER", "SILVER", ifelse(LINE == "GREEN", "GREEN","TRANSFER"))))))
+```
+
+
+
+
+
+```{r}
+ggplot() + 
+  geom_sf(data=st_union(tracts16)) +
+  geom_sf(data=MBTA_ARC, 
+          aes(color = LINE), 
+          show.legend = "line", size= 2) +
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E")) +
+  geom_sf(data=MBTA_NODE,
+          aes(color = transferstation), 
+          show.legend = "point", size= 2)+
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E", "black")) +
+  labs(title="MBTA", 
+       subtitle="Boston, MA", 
+       caption="Figure 2.5") +
+  mapTheme()
+```
+
+# Buffer Relating SEPTA Stops and Tracts
+
+```{r}
+stopBuffer <- st_buffer(MBTA_NODE, 805) # 805 meters which is equivalent to 0.5 miles
+
+stopUnion <- st_union(st_buffer(MBTA_NODE, 805))
+stopUnion <- st_make_valid(stopUnion) # Error
+MBTABuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+```
+
+
+
+```{r}
+ggplot() +
+  geom_sf(data=MBTABuffers) +
+  geom_sf(data=MBTA_NODE, show.legend = "point") +
+  facet_wrap(~Legend) + 
+  labs(caption = "Figure 2.6") +
+  mapTheme()
+```
+
+```{r}
+buffer <- filter(MBTABuffers, Legend=="Unioned Buffer")
+```
+
+```{r}
+clip <- 
+  st_intersection(buffer, tracts16) %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Clip")
+```
+```{r}
+# Do a spatial selection to see which tracts touch the buffer
+
+# approach #1: sub-setting a spatial object with a spatial object using the '[' brackets.
+selection1 <- 
+  tracts16[buffer,] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #2: using `st_intersects` as a verbose way to do approach #1
+selection2 <- tracts16[st_intersects(tracts16, buffer) %>% lengths > 0, ] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #3: use `st_join` to do a spatial join and remove the non-intersecting polygons
+selection3 <- tracts16 %>% 
+  st_join(buffer, join = st_intersects) %>% 
+  filter(!is.na(Legend)) %>% 
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Intersects")
+```
+
+```{r}
+selectCentroids <-
+  st_centroid(tracts16)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts16, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Select by Centroids")
+```
+
+
+```{r}
+intersections <- rbind(clip, selection1, selectCentroids)
+
+ggplot() +
+  geom_sf(data=intersections, aes(fill = TotalPop)) +
+  geom_sf(data=MBTA_NODE, show.legend = "point") +
+  scale_fill_viridis_c() +
+  facet_wrap(~Selection_Type) + 
+  mapTheme()
+
+mapview(clip, )
+```
+## Indicator Maps
+
+```{r}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2016", MedRent * 1.14, MedRent)) 
+```
+```{r}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            Percent_White = mean(pctWhite, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+```
+

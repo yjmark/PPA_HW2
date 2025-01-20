@@ -1,0 +1,652 @@
+---
+title: "HW2 - Do Households Value Transit-rich Neighborhoods compared to Others in Boston?"
+author: "Jun, Youngsang"
+date: "September 19, 2024"
+output: 
+  html_document: 
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+*Since the Tremont Street subway opened in 1897 as North America’s first
+subway tunnel, Boston's subway system has become one of the most beloved
+public transportation options for its residents. As the Metropolitan
+Area Planning Council (MAPC) discovered that a disproportionate share of
+housing and jobs are located near transit in their study, particularly
+with the sharp increase in rents over the past decade, it is necessary
+to assess whether households value transit-rich neighborhoods compared
+to others in Boston and to prepare appropriate policy alternatives. To
+answer this question, this report conducted a Transit Oriented
+Development (TOD) analysis of Boston, by using subway sations data from
+the Massachusetts Bay Transportation Authority (MBTA), along with
+American Community Survey (ACS) data of 2012 and 2022. The result shows
+\~\~\~\~\~\~\~ conclusions about willingness to pay for TOD.*
+
+## Key Facts
+
+1.  In 2022, it has become more difficult to find a house for the same
+    amount of money in Boston compared to 2012, despite the decrease in
+    population per tract. This trend appears to be greater in TOD areas
+    than in non-TOD areas.
+2.  
+3.  
+
+## 1. Data Wrangling Work
+
+The spatial analysis began with data wrangling by using Boston's subway
+arc and node data, which includes 5 lines and 153 stations, provided by
+MBTA, along with ACS data from 2012 and 2022 for 438 tracts within
+Suffolk County, provided by the U.S. Census Bureau. The result of data
+wrangling work is as follows:
+
+a.  Load Libraries and Initial Setup
+
+```{r setup, warning = FALSE, message = FALSE}
+# Install and Load Libraries
+# install.packages('mapview')
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(mapview)
+library(dplyr)
+library(viridis)
+
+# Disable Scientific Notation
+options(scipen=999)
+options(tigris_class = "sf")
+
+# Source for Multiple Ring Buffer
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+# Set Color Table
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+
+# Set ACS API Key
+census_api_key("b2835f54d89a4499ba29829c908967b86765b345", overwrite = TRUE)
+```
+
+b.  Wrangle ACS Data of Suffolk County (which Boston seats of) 2012 and
+    2022
+
+```{r getACS, warning = FALSE, message = FALSE, results = "hide"}
+# Get ACS Data of Suffolk County 2012 and 2022
+tracts12 <-  
+  get_acs(geography = "tract",
+          variables = c("B01003_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), 
+          year=2012, state="MA",
+          county="Suffolk", geometry=TRUE) %>% 
+  st_transform('EPSG:26986') # Use NAD 83 CRS
+tracts12 <- subset(tracts12, GEOID!='25025990101') # Error
+tracts22 <-  
+  get_acs(geography = "tract",
+          variables = c("B01003_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), # Since B25026_001 is Total Population in 
+                                        # Occupied Housing Units, replaced it with B01003_001E
+          year=2022, state="MA",
+          county="Suffolk", geometry=TRUE) %>% 
+  st_transform('EPSG:26986') # Use NAD 83 CRS
+
+# Transforming Long Data to Wide Data Using Spread
+tracts12 <- 
+  tracts12 %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B01003_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+
+tracts22 <- 
+  tracts22 %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B01003_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+
+# Create Column that Calculates Proportion of Whites, Bachelors and Poverty
+tracts12 <- 
+  tracts12 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2012") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+
+tracts22 <- 
+  tracts22 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2022") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+
+# Row Bind of 2012 and 2022
+allTracts <- rbind(tracts12,tracts22)
+```
+
+c.  Wrangling Boston's Subway Arc and Node Data (MBTA Data)
+
+```{r get_MBTA_data, warning = FALSE, message = FALSE, results = "hide"}
+# Get MBTA Data of Transit Line and Node
+MBTA_ARC <- st_read('./MBTA_RT/MBTA_ARC.shp')
+MBTA_NODE <- st_read('./MBTA_RT/MBTA_NODE.shp')
+
+# Create a Column in MBTA_NODE to Distinguish Transfer Stations
+MBTA_NODE <- MBTA_NODE %>%
+  mutate(transferstation = ifelse(LINE == "BLUE", "BLUE",ifelse(LINE == "ORANGE", "ORANGE",ifelse(LINE == "RED", "RED",ifelse(LINE == "SILVER", "SILVER", ifelse(LINE == "GREEN", "GREEN","TRANSFER")))))) %>%
+  mutate(IDD=1:n())
+```
+
+d.  Check if the Locations of MBTA Data are precise in Online map (via
+    Mapview)
+
+```{r mapViewMBTA, warning = FALSE, message = FALSE}
+mapview(tracts22)+mapview(MBTA_ARC)+mapview(MBTA_NODE)
+```
+
+e.  Buffer Relating MBTA Data and Set TOD/Non-TOD area
+
+In this study, TOD area is defined as the total area of tracts whose
+centroids are located in 0.5 miles of each transit station. The
+following figure shows the buffer within 0.5 mile of each transit
+station. The color of line represents each service line, and black dots
+denote transfer stations.
+
+```{r buffer, cache = TRUE, warning = FALSE, message = FALSE}
+stopBuffer <- st_buffer(MBTA_NODE, 805) # 805 meters which is equivalent to 0.5 miles
+stopUnion <- st_union(st_buffer(MBTA_NODE, 805))
+stopUnion <- st_make_valid(stopUnion) 
+MBTABuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, 
+          aes(color = LINE), 
+          show.legend = "line", size= 2) +
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E")) +
+  geom_sf(data=MBTA_NODE,
+          aes(color = transferstation), 
+          show.legend = "point", size= 1)+
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E", "black"), labels = c("BLUE", "GREEN", "ORANGE", "RED", "SILVER", "TRANSFER STN")) +
+  labs(title="Buffer within 0.5 mile of Each Transit Stn", 
+       subtitle="The color of line represents each line, and black dots denote transfer stations", 
+       caption="Data: U.S. Census Bureau, MBTA") +
+  mapTheme()
+```
+
+f.  Create Centroid
+
+```{r centroids, warning = FALSE, message = FALSE}
+buffer <- filter(MBTABuffers, Legend=="Unioned Buffer")
+
+selectCentroids22 <-
+  st_centroid(tracts22)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts22, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(year = "2022")
+selectCentroids22_union <- st_union(selectCentroids22)%>%
+  st_sf() %>%
+  mutate(year = "2022")
+selectCentroids12 <-
+  st_centroid(tracts12)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts12, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(year = "2012")
+selectCentroids12_union <- st_union(selectCentroids12)%>%
+  st_sf() %>%
+  mutate(year = "2012")
+intersections1222_union <- rbind(selectCentroids22_union, selectCentroids12_union)
+
+NODE22 <- st_intersection(MBTA_NODE, tracts22) %>%
+  mutate(year = "2022")
+NODE12 <- st_intersection(MBTA_NODE, tracts12) %>%
+  mutate(year = "2012")
+MBTA_NODE_CLIP <-
+  rbind(NODE22,NODE12)
+```
+
+g.  Row Bind for TOD, Non-TOD, by year
+
+```{r rbind_TOD, warning = FALSE, message = FALSE}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.2747, MedRent)) %>% # Cumulative price change Inflation from 2012 to 2022 is	27.47%
+  mutate(tractArea=st_area(geometry)) %>%
+  mutate(tractpopDens=TotalPop*2589988/units::drop_units(tractArea))
+```
+
+## 2. Four small-multiple visualizations comparing four selected Census variables across time and space (TOD vs. non-TOD)
+
+a.  Population Density by Tract, 2012-2022
+
+The figure below shows the population density per tract and TOD area in
+Boston. The region within the red line, representing the TOD area, is
+colored green, while the Non-TOD area, farther from the station, is
+shown in dark blue. This shows that population density tends to be
+higher near transit stations. In particular, the tract with the highest
+population density in 2012 was located between Symphony, Hynes
+Convention, and Northeastern stations, with a density of 117,000 people
+per square mile. By 2022, the population density in this area is
+projected to decrease to 87,000 people per square mile.
+
+```{r TODmap1, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=tractpopDens))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Population Density by Tract, 2012-2022",
+    subtitle = "Person/mi^2; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+b.  Median Monthly Rent by Tract, 2012-2022
+
+The following figure demonstrates the Median Monthly Rent per tract in
+Boston. The colors near the station are light green or yellow, and the
+colors far from the station are dark green, showing that the Median Rent
+tends to be higher in the TOD area overall. In particular, when
+comparing 2012 and 2022, the Median Rent in the TOD area increased by
+more than \$3,000 in some tracts in 2022. Note that the Median Rent in
+2012 was displayed considering inflation rate from 2012 to 2022 (27.47%)
+in order to derive reasonable results.
+
+```{r TODmap2, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=MedRent.inf))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Median Monthly Rent, 2012-2022",
+    subtitle = "Real dollars; The red border denotes areas close to subway stns;\nThe black dots denote subway stns\nInflation rate considered (compared Rent in 2022 to Rent in 2012*1.2747)",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+c.  Proportion of White by Tract, 2012-2022
+
+The following figure shows the proportion of white population by tract
+in Boston. In the Boston area and the northern and southwestern parts of
+Suffolk County, the difference in white population between TOD and
+non-TOD areas was not large, while in the central and southern parts of
+Suffolk County, the difference in white population between TOD and
+non-TOD areas was large.
+
+```{r TODmap3, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctWhite))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Proportion of White, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+d.  Proportion of Bachelors by Tract, 2012-2022
+
+The figure below shows that the proportion of Bachelors in TOD areas is
+higher than in non-TOD areas. The proportion of Bachelors in some tracts
+near subway stations in TOD areas is 10-15%, which is higher than the
+proportion of Bachelors in the rest of the areas, which is less than 5%.
+Notably, Chestnut Hill and South Boston areas have decreased in the
+percentage of college graduates in 2022 compared to 2012. There was no
+significant difference in Bachelors by year in other regions.
+
+```{r TODmap4, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctBachelors))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Proportion of Bachelors, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+e.  Proportion of Poverty by Tract, 2012-2022
+
+The figure below shows that the proportion of Poverty in TOD areas is
+higher than in non-TOD areas. The proportion of Poverty in some tracts
+near subway stations in TOD areas is higher than the rest of the areas.
+There was no significant difference in Poverty by year in other regions.
+
+```{r TODmap5, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctPoverty))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Proportion of Poverty, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+## 3. Grouped Bar Plot
+
+This grouped bar plots denote that it has become more difficult to find
+a house for the same amount of money despite the decrease in population
+per tract, and this trend appears to be greater in TOD areas than in
+non-TOD areas. The average values of the proportion of white population,
+bachelors, and poverty per tract in 2012 and 2022 divided into TOD and
+Non-TOD areas are as follows. Those values are for reference only as it
+is an average of proportions and not an average per population or area
+of tracts.
+
+```{r summary_barplot, warning = FALSE, message = FALSE}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent.inf, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            Percent_White = mean(pctWhite, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  mutate(Variable = factor(Variable, levels = c("Population", "Rent", "Percent_White", "Percent_Bach", "Percent_Poverty"))) %>%
+  ggplot(aes(year, Value, fill= TOD ))+
+    geom_bar(stat="identity", position="dodge")+
+    facet_wrap(~Variable, scales="free", ncol=5)+
+    scale_fill_manual(values=c("#bae4bc","#0868ac"))+
+    labs(title="Indicator Differences across Time and Space")+
+    plotTheme() + theme(legend.position="bottom",
+                        plot.title = element_text(size=15), 
+      axis.title = element_text(size=11), 
+      axis.text = element_text(size=11),  
+      strip.text = element_text(size=8)  # facet 제목 글씨 크기
+    )
+```
+
+## 4. TOD Indicator Table per Tract
+
+In 2022, the average population per tract in both TOD and Non-TOD areas
+decreased by less than 10% compared to 2012, but the average Median Rent
+per tract increased by 23.8% (57.8% when excluding inflation) in Non-TOD
+areas and 30.7% (66.5% when excluding inflation) in TOD areas. The
+average values of the proportion of white population, bachelors, and
+poverty per tract in 2012 and 2022 divided into TOD and Non-TOD areas
+are as follows. Those values are for reference only as it is an average
+of proportions and not an average per population or area of tracts.
+
+```{r summary_table, warning = FALSE, message = FALSE}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove=T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Variable = factor(Variable, levels = c("Population", "Rent", "Percent_White", "Percent_Bach", "Percent_Poverty")))%>%
+  mutate(Value=round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kbl(caption = "TOD Indicator Table per Tract in 2012 and 2022") %>%
+  kable_styling(position="center") %>%
+  kable_classic(full_width = T, html_font = "Arial")
+```
+
+## 5. A Graduated Symbol Map of Population and Median Rent within 0.5 mile of Each Transit Stn
+
+A graduated symbol map showing data within a 0.5-mile buffer around each
+transit station provides useful information into the trends of
+population and median rent near transit stations. To do this, I
+calculated the population and median rent density per tract, which were
+derived from ACS data. Second, I iterated to intersect over the tracts
+with transit station buffer circles, and to multiple by population and
+median rent density and area of the cut tracts. Finally, I summed them
+within each buffer circle.
+
+```{r pop_medRent_in_buffer, warning = FALSE, message = FALSE, results = "hide"}
+# Calculate Population and Rent Density per Tract
+allTracts_Dens <- allTracts %>%
+  mutate(tractArea=st_area(geometry)) %>%
+  mutate(popDens=TotalPop/tractArea) %>%
+  mutate(medDens=MedRent/tractArea)
+
+allTracts_Dens22 <- subset(allTracts_Dens, year!='2012')
+allTracts_Dens12 <- subset(allTracts_Dens, year!='2022')
+
+# Calculate Area of Each Buffer
+stopBuffer <- stopBuffer %>%
+  mutate(bufferArea=st_area(geometry)) 
+
+# Intersect (To Cut tracts22_Dens by stopBuffer12, 
+# Loop through each stop and intersect with tracts22_Dens/tracts12_Dens)
+results22 <- data.frame()
+results12 <- data.frame()
+stop_intersect <- data.frame()
+for(i in 1:nrow(stopBuffer)) {
+  stop_intersect <- st_intersection(stopBuffer[i,], allTracts_Dens22) %>% 
+    mutate(partArea=st_area(geometry)) %>% 
+    mutate(partPop = as.numeric(partArea*TotalPop/2034900)) %>% 
+    mutate(partMed = as.numeric(partArea*MedRent/2034900))
+  results22 <- rbind(results22, stop_intersect)
+  stop_intersect <- data.frame()
+  print(i)
+}
+
+for(i in 1:nrow(stopBuffer)) {
+  stop_intersect <- st_intersection(stopBuffer[i,], allTracts_Dens12) %>% 
+    mutate(partArea=st_area(geometry)) %>% 
+    mutate(partPop = as.numeric(partArea*TotalPop/2034900)) %>% 
+    mutate(partMed = as.numeric(partArea*MedRent/2034900))
+  results12 <- rbind(results12, stop_intersect)
+  stop_intersect <- data.frame()
+  print(i)
+}
+```
+
+```{r pop_medRent_in_buffer2, warning = FALSE, message = FALSE}
+a <- st_drop_geometry(results22) %>%
+  group_by(IDD, year) %>%
+  summarize(
+    partVal_pop=sum(partPop, na.rm=TRUE),
+    partVal_med=sum(partMed, na.rm=TRUE)
+  )
+
+b <- st_drop_geometry(results12) %>%
+  group_by(IDD, year) %>%
+  summarize(
+    partVal_pop=sum(partPop, na.rm=TRUE),
+    partVal_med=sum(partMed, na.rm=TRUE)
+  )
+
+abGraph <- rbind(a,b)
+abGraph <- left_join(abGraph, MBTA_NODE, by="IDD")
+#medGraph <- rbind(b,d) 
+#medGraph <- left_join(medGraph, MBTA_NODE, by="IDD")
+```
+
+### 5.1. Map of Population
+
+This graduated symbol map shows that population within 0.5 mile of each
+transit station. Central Boston has upto 80,000 people.
+
+```{r PopRentPlot_12-22, warning = FALSE, message = FALSE}
+#PLOT for Population 2012-2022
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, size= 2) +
+  geom_point(
+    data=abGraph,
+    alpha=0.5,
+    aes(color=as.numeric(partVal_pop), size = as.numeric(partVal_pop), geometry = geometry),
+    stat = "sf_coordinates")+
+  facet_wrap(~year)+
+  scale_color_viridis(option="C")+
+  scale_size_continuous(range=c(2,8))+
+  labs(title="Population within 0.5 mile of Each Transit Stn", 
+       subtitle="Boston (Suffolk County), MA", 
+       caption="Data: U.S. Census Bureau, MBTA") +
+  guides(color = guide_legend("as.numeric(partVal_pop)"), size = guide_legend("as.numeric(partVal_pop)")) +
+  theme_void()+
+  theme(legend.position = "right")
+```
+
+### 5.2. Map of Median Rent per square mile
+
+annotate each visualization appropriately: The station of highest median
+rent is Massachusetts Avenue Station as well, whose value is \$45,000.
+
+```{r PopRentPlot_12-22_2, warning = FALSE, message = FALSE}
+#PLOT for Median Rent 2012-2022
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, size= 2) +
+  geom_point(
+    data=abGraph,
+    alpha=0.5,
+    aes(color=as.numeric(partVal_med), size = as.numeric(partVal_med), geometry = geometry),
+    stat = "sf_coordinates")+
+  facet_wrap(~year)+
+  scale_color_viridis(option="D")+
+  scale_size_continuous(range=c(2,8))+
+  labs(title="Median Rent within 0.5 mile of Each Transit Stn", 
+       subtitle="Boston (Suffolk County), MA", 
+       caption="Data: U.S. Census Bureau, MBTA") +
+  guides(color = guide_legend("as.numeric(partVal_med)"), size = guide_legend("as.numeric(partVal_med)")) +
+  theme_void()+
+  theme(legend.position = "right")
+```
+
+## 6.
+
+```{r medRent_Dist_Relation, warning = FALSE, message = FALSE}
+allTracts.rings <-
+  st_join(
+    st_centroid(dplyr::select(allTracts, GEOID, year)),
+    multipleRingBuffer(st_union(MBTA_NODE), 14484, 805)) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year),
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance=distance/1609)
+
+ggplot() +
+  geom_sf(data=allTracts.rings, aes(fill=distance))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", color='white', size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Distance to Subway Stns, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe white dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+```{r medRent_Dist_Relation2, warning = FALSE, message = FALSE}
+MedRent_sum22 <- allTracts.rings %>%
+  filter(year %in% "2022", !is.na(MedRent)) %>%
+  group_by(distance) %>%
+  summarize(mean_value = mean(MedRent)) %>%
+  mutate(year=2022)
+
+MedRent_sum12 <- allTracts.rings %>%
+  filter(year %in% "2012", !is.na(MedRent)) %>%
+  group_by(distance) %>%
+  summarize(mean_value = mean(MedRent)) %>%
+  mutate(year=2012)
+
+MedRent_sum <- rbind(MedRent_sum22,MedRent_sum12)
+
+
+#MedRent_mean <- aggregate(MedRent ~ distance, data = allTracts.rings, FUN = mean, na.rm=TRUE, na.action=NULL)
+MedRent_sum$year <- as.factor(MedRent_sum$year)
+ggplot(MedRent_sum, aes(x = distance, y = mean_value, group=year, color=year)) +
+  geom_line() +
+  scale_x_continuous(limits = c(0.5, 3.6), breaks = seq(0.5, 3.6, by = 0.5)) +
+  scale_y_continuous(limits = c(0, 2000), breaks = seq(0, 2000, by = 200)) +
+  scale_color_manual(values = c("2022" = "red", "2012" = "blue"))+
+labs(
+    title = "Median Monthly Rent as a Function of Distance from Subway Stns",
+    subtitle = "Boston (Suffolk County), MA",
+    caption = "Data: U.S. Census Bureau, MBTA",
+    x="Distance from Subway Stns (Miles)", 
+    y="Median Monthly Rent ($)",
+    color = "Year") +
+  theme_minimal()
+```
+
+# Conclusion:
+
+provide brief policy-relevant conclusions about willingness to pay for
+TOD and how that might vary in the study area TOD에 대한 지불 의사와
+연구 지역에서 이것이 어떻게 다를 수 있는지에 대한 간단한 정책 관련
+결론을 제공합니다. 전체적으로는 지하철역에서부터 거리가 가까운
+지역일수록 월세가 높아지는 것으로 나타났다. 특히 1.5마일까지는
+지하철역에서부터 거리가 가까울수록 월세가 오르는 경향이 더 컸다. 다만
+지하철에서부터 거리가 2마일 이상인 지역들 간에는 월세 차이가 없었다.
+공간분석 결과로부터 지하철에서부터 거리가 1.5마일 이하인 지역에 대하여
+TOD 정책이 임대료를 높인 것인지, 임대료가 높아서 TOD 정책을 실시하여야
+하는지 인과관계를 직접적으로 알 수는 없었다. 다만 더 많은 사람들이
+대중교통 접근을 높이고 지하철 이용률을 높이기 위해서는
+
+TOD로 인하여 지하철역 주변 지역의 월세와 인구가 올랐는지, 아니면 인과
+관계를 확인할 수는 없었지만,
+
+,. The Massachusetts Bay Transportation Authority (MBTA) annotate each
+visualization appropriately:
+
+Your assignment is to prepare a policy brief for the local City Council
+representatives in Boston (Suffolk County).
+
+How certain can you be about your conclusions given some of the spatial
+biases we’ve discussed?

@@ -1,0 +1,531 @@
+---
+title: "HW2 - Boston TOD Analysis"
+author: "Jun, Youngsang / yjmark@design.upenn.edu"
+date: 'September 19, 2024'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Brief Motivation
+
+annotate each visualization appropriately:
+
+# 1. Data Wrangling Work
+
+Load Libraries
+
+```{r}
+# Install and Load Libraries
+install.packages("mapview")
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(mapview)
+library(dplyr)
+library(viridis)
+
+# Disable Scientific Notation
+options(scipen=999)
+options(tigris_class = "sf")
+
+# Multiple
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+# Set Color Table
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+
+# Set ACS API Key
+census_api_key("b2835f54d89a4499ba29829c908967b86765b345", overwrite = TRUE)
+```
+
+Wrangle American Community Survey (ACS) Data of Suffolk County (which
+Boston seats of) 2012 and 2022
+
+```{r}
+# Get ACS Data of Suffolk County 2012 and 2022
+tracts12 <-  
+  get_acs(geography = "tract",
+          variables = c("B01003_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), 
+          year=2012, state="MA",
+          county="Suffolk", geometry=TRUE) %>% 
+  	
+  st_transform('EPSG:26986') # Use NAD 83 CRS
+tracts12 <- subset(tracts12, GEOID!='25025990101') # Error
+tracts22 <-  
+  get_acs(geography = "tract",
+          variables = c("B01003_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), # Since B25026_001 is Total Population in Occupied Housing Units, used B01003_001E instead 
+          year=2022, state="MA",
+          county="Suffolk", geometry=TRUE) %>% 
+  	
+  st_transform('EPSG:26986') # Use NAD 83 CRS
+
+# Transforming Long Data to Wide Data Using Spread
+tracts12 <- 
+  tracts12 %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B01003_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+
+tracts22 <- 
+  tracts22 %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B01003_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+
+# Create Column that Calculates Percentage of Whites, Bachelors and Poverty
+tracts12 <- 
+  tracts12 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2012") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+
+tracts22 <- 
+  tracts22 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2022") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+
+# Row Bind of 2012 and 2022
+allTracts <- rbind(tracts12,tracts22)
+```
+
+Wrangle Massachusetts Bay Transportation Authority (MBTA) Data
+
+```{r}
+# Get MBTA Data of Transit Line and Node
+MBTA_ARC <- st_read('./MBTA_RT/MBTA_ARC.shp')
+MBTA_NODE <- st_read('./MBTA_RT/MBTA_NODE.shp')
+
+# Create a Column in MBTA_NODE to Distinguish Transfer Stations
+MBTA_NODE <- MBTA_NODE %>%
+  mutate(transferstation = ifelse(LINE == "BLUE", "BLUE",ifelse(LINE == "ORANGE", "ORANGE",ifelse(LINE == "RED", "RED",ifelse(LINE == "SILVER", "SILVER", ifelse(LINE == "GREEN", "GREEN","TRANSFER"))))))
+```
+
+Buffer Relating SEPTA Stops and Tracts and Set TOD/Non-TOD area
+
+```{r buffer, include=FALSE, cache = TRUE}
+stopBuffer <- st_buffer(MBTA_NODE, 805) # 805 meters which is equivalent to 0.5 miles
+stopUnion <- st_union(st_buffer(MBTA_NODE, 805))
+stopUnion <- st_make_valid(stopUnion) 
+MBTABuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, 
+          aes(color = LINE), 
+          show.legend = "line", size= 2) +
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E")) +
+  geom_sf(data=MBTA_NODE,
+          aes(color = transferstation), 
+          show.legend = "point", size= 1)+
+  scale_color_manual(values = c("#0C4C91", "#008445", "#F18C20", "#E12726", "#7C878E", "black"), labels = c("BLUE", "GREEN", "ORANGE", "RED", "SILVER", "TRANSFER STN")) +
+  labs(title="MBTA", 
+       subtitle="Boston, MA", 
+       caption="Figure 2.5") +
+  mapTheme()
+
+# mapview(MBTA_ARC)+ mapview(MBTA_NODE)+ mapview(MBTABuffers)+ mapview(MBTABuffers)
+```
+
+
+```{r}
+clip <- 
+  st_intersection(buffer, tracts22) %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Clip")
+```
+
+```{r}
+# Do a spatial selection to see which tracts touch the buffer
+
+# approach #1: sub-setting a spatial object with a spatial object using the '[' brackets.
+selection1 <- 
+  tracts22[buffer,] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #2: using `st_intersects` as a verbose way to do approach #1
+selection2 <- tracts22[st_intersects(allTracts, buffer) %>% lengths > 0, ] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #3: use `st_join` to do a spatial join and remove the non-intersecting polygons
+selection3 <- tracts22 %>% 
+  st_join(buffer, join = st_intersects) %>% 
+  filter(!is.na(Legend)) %>% 
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Intersects")
+```
+
+```{r}
+selectCentroids22 <-
+  st_centroid(tracts22)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts22, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(year = "2022")
+selectCentroids22_union <- st_union(selectCentroids22)%>%
+  st_sf() %>%
+  mutate(year = "2022")
+selectCentroids12 <-
+  st_centroid(tracts12)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts12, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(year = "2012")
+selectCentroids12_union <- st_union(selectCentroids12)%>%
+  st_sf() %>%
+  mutate(year = "2012")
+intersections1222_union <- rbind(selectCentroids22_union, selectCentroids12_union)
+
+NODE22 <- st_intersection(MBTA_NODE, tracts22) %>%
+  mutate(year = "2022")
+NODE12 <- st_intersection(MBTA_NODE, tracts12) %>%
+  mutate(year = "2012")
+MBTA_NODE_CLIP <-
+  rbind(NODE22,NODE12)
+```
+
+```{r}
+#intersections <- rbind(clip, selection1, selectCentroids22)
+
+#ggplot() +
+  #geom_sf(data=intersections, aes(fill = TotalPop)) +
+  #geom_sf(data=MBTA_NODE, show.legend = "point") +
+  #scale_fill_viridis_c() +
+  #facet_wrap(~Selection_Type) + 
+  #mapTheme()
+```
+
+# 2. Four small-multiple visualizations comparing four selected Census variables across time and space (TOD vs. non-TOD)
+
+annotate each visualization appropriately:
+
+```{r}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.2747, MedRent)) # Cumulative price change Inflation from 2012 to 2022 is	27.47%
+```
+
+```{r}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=MedRent))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Median Rent, 2012-2022",
+    subtitle = "Real dollars; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+```{r}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctWhite))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Percentage of White, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+```{r}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctBachelors))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Percentage of Bachelors, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+```{r}
+ggplot() +
+  geom_sf(data=allTracts.group, aes(fill=pctPoverty))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Percentage of Poverty, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe black dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+```
+
+
+
+
+```{r}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            Percent_White = mean(pctWhite, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+```
+
+# 3. Grouped Bar Plot
+
+annotate each visualization appropriately:
+
+```{r}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill= TOD ))+
+    geom_bar(stat="identity", position="dodge")+
+    facet_wrap(~Variable, scales="free", ncol=5)+
+    scale_fill_manual(values=c("#bae4bc","#0868ac"))+
+    labs(title="Indicator Differences across TIme and Space")+
+    plotTheme() + theme(legend.position="bottom")
+```
+
+# 4. Table
+
+annotate each visualization appropriately:
+
+```{r}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove=T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value=round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable() %>%
+    kable_styling()
+```
+
+# 5.a) A Graduated Symbol Map of Population within 0.5 mile of Each Transit Stn
+
+annotate each visualization appropriately::
+
+```{r}
+# 트랙마다 인구밀도(=인구/면적) 계산
+allTracts_Dens <- allTracts %>%
+  mutate(tractArea=st_area(geometry)) %>%
+  mutate(popDens=TotalPop/tractArea) %>%
+  mutate(medDens=MedRent/tractArea)
+
+# 역마다 버퍼 동그라미 면적 계산
+stopBuffer <- stopBuffer %>%
+  mutate(bufferArea=st_area(geometry)) 
+
+# stopBuffer12 <- stopBuffer 
+
+# Intersect (To Cut tracts22_Dens by stopBuffer12, 
+# Loop through each stop and intersect with tracts22_Dens/tracts12_Dens)
+stop_results <- data.frame()
+hap <- data.frame()
+for(i in 1:nrow(stopBuffer)) {
+  stop_intersect <- st_intersection(stopBuffer[i,], allTracts_Dens) %>% 
+    mutate(partArea=st_area(geometry)) %>% 
+    mutate(partPop = partArea*popDens) %>% 
+    mutate(partMed = partArea*medDens)
+  stop_results <- rbind(stop_results, stop_intersect)
+  print(i)
+}
+
+hapPop22 <- stop_results %>%
+  filter(year %in% "2022") 
+hapMed22 <- stop_results %>%
+  filter(year %in% "2022") 
+hapPop12 <- stop_results %>%
+  filter(year %in% "2012")
+hapMed12 <- stop_results %>%
+  filter(year %in% "2012") 
+
+a <- aggregate(hapPop22$partPop, by=list(hapPop22$STATION), FUN=sum, na.rm=TRUE, na.action=NULL) 
+colnames(a) <- c("STATION","partVal") 
+a <- a %>%
+  mutate(year="2022") %>%
+  mutate(classification="Population by Subway Stn")
+  
+b <-aggregate(hapMed22$partMed, by=list(hapMed22$STATION), FUN=sum, na.rm=TRUE, na.action=NULL)
+colnames(b) <- c("STATION","partVal")
+b <- b %>%
+  mutate(year="2022") %>%
+  mutate(classification="Median Rent by Subway Stn")
+
+c <-aggregate(hapPop12$partPop, by=list(hapPop12$STATION), FUN=sum, na.rm=TRUE, na.action=NULL)
+colnames(c) <- c("STATION","partVal") 
+c <- c %>%
+  mutate(year="2012") %>%
+  mutate(classification="Population by Subway Stn")
+
+d <-  aggregate(hapMed12$partMed, by=list(hapMed12$STATION), FUN=sum, na.rm=TRUE, na.action=NULL)
+colnames(d) <- c("STATION","partVal")
+d <- d %>%
+  mutate(year="2012") %>%
+  mutate(classification="Median Rent by Subway Stn")
+
+popGraph <- rbind(a,c)
+popGraph <- left_join(popGraph,MBTA_NODE, by="STATION")
+medGraph <- rbind(b,d) 
+medGraph <- left_join(medGraph,MBTA_NODE, by="STATION")
+#PLOT for Population 2012-2022
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, size= 2) +
+  geom_point(
+    data=popGraph,
+    alpha=0.5,
+    aes(color=as.numeric(partVal), size = as.numeric(partVal), geometry = geometry),
+    stat = "sf_coordinates")+
+  facet_wrap(~year)+
+  scale_color_viridis(option="C")+
+  scale_size_continuous(range=c(2,18))+
+  labs(title="Population within 0.5 mile of Each Transit Stn", 
+       subtitle="Boston, MA", 
+       caption="Figure 2.5") +
+  guides(color = guide_legend("as.numeric(partVal)"), size = guide_legend("as.numeric(partVal)")) +
+  theme_void()+
+  theme(legend.position = "right")
+
+
+```
+
+# 5.b) A Graduated Symbol Map of Rent within 0.5 mile of Each Transit Stn
+
+annotate each visualization appropriately:
+
+```{r}
+#PLOT for Median Rent 2012-2022
+ggplot() + 
+  geom_sf(data=st_union(tracts22)) +
+  geom_sf(data=MBTABuffers, alpha=0.5, fill="#E5E7E9", color = "gray") +
+  geom_sf(data=MBTA_ARC, size= 2) +
+  geom_point(
+    data=medGraph,
+    alpha=0.5,
+    aes(color=as.numeric(partVal), size = as.numeric(partVal), geometry = geometry),
+    stat = "sf_coordinates")+
+  facet_wrap(~year)+
+  scale_color_viridis(option="D")+
+  scale_size_continuous(range=c(2,18))+
+  labs(title="Median Rent within 0.5 mile of Each Transit Stn", 
+       subtitle="Boston, MA", 
+       caption="Figure 2.5") +
+  guides(color = guide_legend("as.numeric(partVal)"), size = guide_legend("as.numeric(partVal)")) +
+  theme_void()+
+  theme(legend.position = "right")
+```
+
+# 6.
+```{r}
+allTracts.rings <-
+  st_join(
+    st_centroid(dplyr::select(allTracts, GEOID, year)),
+    multipleRingBuffer(st_union(MBTA_NODE), 14484, 805)) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year),
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance=distance/1609)
+
+ggplot() +
+  geom_sf(data=allTracts.rings, aes(fill=distance))+
+  geom_sf(data=intersections1222_union, fill='transparent', color='red', lwd = 1)+
+    geom_sf(data=MBTA_NODE_CLIP, 
+          show.legend = "point", color='white', size= 1)+
+  facet_wrap(~year)+
+  scale_fill_viridis()+
+  labs(
+    title = "Distance to Subway Stns, 2012-2022",
+    subtitle = "0.0-1.0; The red border denotes areas close to subway stns;\nThe white dots denote subway stns",
+    caption = "Data: U.S. Census Bureau, MBTA") +
+  theme_void()
+
+MedRent_sum22 <- allTracts.rings %>%
+  filter(year %in% "2022", !is.na(MedRent)) %>%
+  group_by(distance) %>%
+  summarize(mean_value = mean(MedRent)) %>%
+  mutate(year=2022)
+
+MedRent_sum12 <- allTracts.rings %>%
+  filter(year %in% "2012", !is.na(MedRent)) %>%
+  group_by(distance) %>%
+  summarize(mean_value = mean(MedRent)) %>%
+  mutate(year=2012)
+
+MedRent_sum <- rbind(MedRent_sum22,MedRent_sum12)
+
+
+#MedRent_mean <- aggregate(MedRent ~ distance, data = allTracts.rings, FUN = mean, na.rm=TRUE, na.action=NULL)
+MedRent_sum$year <- as.factor(MedRent_sum$year)
+ggplot(MedRent_sum, aes(x = distance, y = mean_value, group=year, color=year)) +
+  geom_line() +
+  scale_x_continuous(limits = c(0.5, 3.6), breaks = seq(0.5, 3.6, by = 0.5)) +
+  scale_y_continuous(limits = c(0, 2000), breaks = seq(0, 2000, by = 200)) +
+  scale_color_manual(values = c("2022" = "red", "2012" = "blue"))+
+labs(
+    title = "Rent as a function of distance to Subway Stns",
+    subtitle = "Boston, MA",
+    caption = "Data: US Census Bureau, ACS 5-year estimates",
+    x="Miles", 
+    y="Median Monthly Rent ($)",
+    color = "Year") +
+  theme_minimal()
+```
+
+# Conclusion:
+
+provide brief policy-relevant conclusions about willingness to pay for
+TOD and how that might vary in the study area
